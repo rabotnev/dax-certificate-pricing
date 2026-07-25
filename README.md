@@ -1,8 +1,6 @@
+# DAX Index Certificate Pricing
 
-# dax-certificate-pricing
+Monte Carlo valuation of DAX-linked index certificates under the risk-neutral
+measure, with variance-reduction and discretisation-bias analysis.
 
-<!-- badges: start -->
-<!-- badges: end -->
-
-The goal of dax-certificate-pricing is to ...
-
+Work in progress.
