@@ -1,0 +1,188 @@
+---
+title: "How Much Does the Time Grid Cost?"
+author: "Daniil Rabotnev"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: paper
+    highlight: tango
+    df_print: paged
+subtitle: Discretisation bias in a path-dependent payoff
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5,
+                      cache = TRUE)
+devtools::load_all("..")
+```
+
+# The question
+
+The certificate pays
+
+$$
+\frac{\max_{0 \le t \le \tau} S_t - \min_{0 \le t \le \tau} S_t}
+     {\operatorname{avg}_{0 \le t \le \tau} S_t},
+$$
+
+where the maximum and minimum are taken over *continuous* time. The simulation
+observes the path at 61 points and takes the maximum and minimum of those.
+
+Between two grid points the path keeps moving. Whatever it does there is
+invisible, and it can only push the observed maximum down and the observed
+minimum up relative to the truth. The discrete range is therefore **always** at
+most the continuous range, never more. This is a one-sided error — a bias, not
+noise — and adding paths does not remove it.
+
+The previous report established how to measure Monte Carlo error correctly.
+This one asks whether that error is the thing worth worrying about.
+
+```{r parameters}
+S0       <- 25250
+r        <- 0.02
+sigma    <- 0.18
+maturity <- 4
+K        <- 27000
+
+M_grid   <- c(60, 125, 250, 500, 1000)
+n_paths  <- 20000
+```
+
+Antithetic sampling is switched off here. Report 02 showed it does nothing for
+this payoff, and leaving it on would only make the standard errors harder to
+read.
+
+# Refining the grid
+
+```{r convergence}
+grid_run <- function(M) {
+  set.seed(4242)
+  P    <- simulate_gbm(S0, r, sigma, maturity, M, n_paths, antithetic = FALSE)
+  cert <- price_mc(payoff_variance_certificate(P), r, maturity)
+  call <- price_mc(payoff_call(P, K), r, maturity)
+  data.frame(M = M,
+             certificate = cert$price, certificate_se = cert$se,
+             call = call$price, call_se = call$se)
+}
+
+grid <- do.call(rbind, lapply(M_grid, grid_run))
+grid
+```
+
+The certificate price rises monotonically with the number of steps, exactly as
+the argument above predicts. Every refinement uncovers a little more of the
+path's true excursion.
+
+# Extrapolating to continuous monitoring
+
+For discretely monitored path-dependent claims the bias decays like
+$1/\sqrt{M}$ rather than $1/M$ — the slow rate is a known feature of maxima of
+Brownian paths, not an artefact of this implementation. That gives a way to
+estimate the continuous-monitoring price without ever simulating it: fit
+
+$$
+P(M) \;=\; a + \frac{b}{\sqrt{M}}
+$$
+
+and read off the intercept $a$, which is the limit as $M \to \infty$.
+
+```{r extrapolation}
+fit <- stats::lm(certificate ~ I(1 / sqrt(M)), data = grid)
+
+continuous_limit <- unname(stats::coef(fit)[1])
+bias_at_60       <- grid$certificate[grid$M == 60] - continuous_limit
+
+data.frame(
+  intercept_a      = continuous_limit,
+  slope_b          = unname(stats::coef(fit)[2]),
+  r_squared        = summary(fit)$r.squared,
+  price_at_M_60    = grid$certificate[grid$M == 60],
+  bias_at_M_60     = bias_at_60,
+  bias_percent     = 100 * bias_at_60 / continuous_limit
+)
+```
+
+```{r convergence-plot, echo=FALSE}
+xs <- 1 / sqrt(grid$M)
+plot(xs, grid$certificate, pch = 19, col = "steelblue",
+     xlim = c(0, max(xs) * 1.05),
+     ylim = range(c(grid$certificate, continuous_limit)) + c(-0.01, 0.01),
+     xlab = expression(1 / sqrt(M)), ylab = "certificate price",
+     main = "Convergence to continuous monitoring")
+abline(fit, col = "grey40")
+points(0, continuous_limit, pch = 4, cex = 1.6, lwd = 2, col = "indianred")
+text(xs, grid$certificate, labels = paste0("M=", grid$M), pos = 4, cex = 0.8)
+text(0, continuous_limit, labels = "extrapolated limit", pos = 4,
+     cex = 0.8, col = "indianred")
+```
+
+Plotting against $1/\sqrt{M}$ turns the convergence into a straight line, and
+the intercept at zero is the continuous-monitoring price. The fit being close
+to linear is itself evidence that the $1/\sqrt{M}$ rate is the right one.
+
+# The control: a payoff that cannot be affected
+
+If the simulator itself were mis-specified, everything above would be
+meaningless. The European call provides a clean control. It depends only on
+$S_\tau$, and the GBM step is exact rather than an Euler approximation, so its
+price must not depend on $M$ at all.
+
+```{r control}
+data.frame(
+  M          = grid$M,
+  call       = grid$call,
+  call_se    = grid$call_se,
+  z_vs_first = (grid$call - grid$call[1]) / grid$call_se
+)
+```
+
+The call price wanders by well under two standard errors across a
+seventeen-fold refinement of the grid — pure Monte Carlo noise, no trend. The
+simulator is fine. The bias in the certificate comes from the payoff being
+path-dependent, nothing else.
+
+# Bias against noise
+
+```{r error-comparison}
+mc_se <- grid$certificate_se[grid$M == 60]
+
+data.frame(
+  source = c("Monte Carlo standard error", "Discretisation bias"),
+  size   = c(mc_se, abs(bias_at_60)),
+  ratio  = c(1, abs(bias_at_60) / mc_se)
+)
+```
+
+This is the finding. At `r sprintf("M = %d", 60)` the reported confidence
+interval is roughly `r sprintf("%.4f", 2 * 1.96 * mc_se)` wide, while the
+number it brackets sits about `r sprintf("%.4f", abs(bias_at_60))` away from
+the quantity the contract actually specifies. The interval is precise and
+centred on the wrong value.
+
+Increasing the number of paths narrows the interval and does nothing about the
+gap. Only refining the grid — or correcting for it, as the extrapolation above
+does — moves the estimate towards the truth.
+
+# Conclusion
+
+* The discrete maximum and minimum bias the certificate payoff downwards by
+  construction. At `M = 60` the price is understated by roughly
+  `r sprintf("%.0f%%", abs(100 * bias_at_60 / continuous_limit))`.
+* The bias decays like $1/\sqrt{M}$, so a linear fit against $1/\sqrt{M}$
+  recovers the continuous-monitoring price without simulating it.
+* At the grid used in the original report the bias is around
+  `r sprintf("%.0f", abs(bias_at_60) / mc_se)` times the Monte Carlo standard
+  error. Reporting a tight confidence interval at that resolution overstates
+  what the simulation knows.
+* The European call is unaffected, which confirms the simulator is correct and
+  isolates the cause to path dependence.
+
+The practical recommendation is to price the certificate on a grid of at least
+several hundred steps, or to quote the extrapolated value with the fit above
+and state the grid it came from.
