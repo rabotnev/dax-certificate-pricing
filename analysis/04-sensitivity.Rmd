@@ -1,0 +1,170 @@
+---
+title: "Which Error Actually Matters?"
+author: "Daniil Rabotnev"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: paper
+    highlight: tango
+    df_print: paged
+subtitle: Volatility sensitivity and an error budget for the certificate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5,
+                      cache = TRUE)
+devtools::load_all("..")
+```
+
+# The question
+
+The pricing report claims the certificate payoff rises with volatility, and
+leaves it at that. Two things follow from taking the claim seriously.
+
+First, how strongly? A payoff defined as a range divided by an average is not
+obviously linear in $\sigma$, and the shape matters for hedging intuition.
+
+Second, and more usefully: volatility is not observed. It is estimated, and the
+estimate is wrong by some amount. That is a third source of error alongside the
+two already measured — Monte Carlo noise in report 02, grid bias in report 03.
+Ranking all three says where effort should go.
+
+```{r parameters}
+S0       <- 25250
+r        <- 0.02
+sigma    <- 0.18
+maturity <- 4
+K        <- 27000
+
+M        <- 250        # fine enough that grid bias is small, per report 03
+n_paths  <- 40000
+sigma_grid <- c(0.05, 0.10, 0.15, 0.18, 0.25, 0.35, 0.50)
+```
+
+# Sweeping volatility
+
+```{r sweep}
+price_at <- function(s, M. = M, n. = n_paths, seed = 808) {
+  set.seed(seed)
+  P    <- simulate_gbm(S0, r, s, maturity, M., n., antithetic = FALSE)
+  cert <- price_mc(payoff_variance_certificate(P), r, maturity)
+  call <- price_mc(payoff_call(P, K), r, maturity)
+  data.frame(sigma = s,
+             certificate = cert$price, certificate_se = cert$se,
+             call = call$price, call_se = call$se)
+}
+
+sweep <- do.call(rbind, lapply(sigma_grid, price_at))
+sweep
+```
+
+```{r sweep-plot, echo=FALSE, fig.height=4}
+op <- par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3, 1))
+
+with(sweep, {
+  plot(sigma, certificate, type = "b", pch = 19, col = "steelblue",
+       xlab = expression(sigma), ylab = "price",
+       main = "Variance certificate")
+  arrows(sigma, certificate - 1.96 * certificate_se,
+         sigma, certificate + 1.96 * certificate_se,
+         angle = 90, code = 3, length = 0.03, col = "grey50")
+  abline(lm(certificate ~ sigma), lty = 2, col = "indianred")
+
+  plot(sigma, call, type = "b", pch = 19, col = "steelblue",
+       xlab = expression(sigma), ylab = "price",
+       main = "European call")
+  arrows(sigma, call - 1.96 * call_se, sigma, call + 1.96 * call_se,
+         angle = 90, code = 3, length = 0.03, col = "grey50")
+})
+par(op)
+```
+
+The confidence intervals are too narrow to see at this scale, which is the
+first hint at the answer to the second question.
+
+# The certificate is linear in volatility
+
+```{r linearity}
+lin <- stats::lm(certificate ~ sigma, data = sweep)
+
+data.frame(
+  intercept = unname(stats::coef(lin)[1]),
+  slope     = unname(stats::coef(lin)[2]),
+  r_squared = summary(lin)$r.squared,
+  max_abs_residual = max(abs(stats::residuals(lin)))
+)
+```
+
+A dimensionless range-over-average payoff turns out to be almost exactly
+proportional to volatility over the whole range from 5% to 50%. The slope is
+the useful number: it converts a volatility error directly into a price error.
+
+The call, by contrast, is visibly concave in $\sigma$ — the familiar shape of
+vega falling away as the option moves deep in the money.
+
+# An error budget
+
+Three sources of error, measured in the units of the certificate price at
+$\sigma = 18\%$.
+
+```{r error-budget}
+base <- price_at(sigma)
+
+# 1. Monte Carlo noise, at the settings used in the original pricing report
+set.seed(20260725)
+P_orig <- simulate_gbm(S0, r, sigma, maturity, M = 60, n_paths = 10000,
+                       antithetic = TRUE)
+mc_se <- price_mc(payoff_variance_certificate(P_orig), r, maturity,
+                  antithetic = TRUE)$se
+
+# 2. Grid bias: how much the price moves from M = 60 to a fine grid.
+#    Report 03 extrapolates properly; this is a conservative lower bound.
+coarse    <- price_at(sigma, M. = 60)$certificate
+fine      <- price_at(sigma, M. = 1000)$certificate
+grid_bias <- fine - coarse
+
+# 3. Volatility misspecification: three vol points either way
+vol_error <- unname(stats::coef(lin)[2]) * 0.03
+
+budget <- data.frame(
+  source = c("Monte Carlo noise (n = 10,000)",
+             "Grid bias (M = 60 vs M = 1000)",
+             "Volatility off by 3 points"),
+  size   = c(mc_se, abs(grid_bias), abs(vol_error))
+)
+budget$relative_to_noise <- budget$size / budget$size[1]
+budget
+```
+
+```{r budget-plot, echo=FALSE, fig.height=3.5}
+op <- par(mar = c(4, 14, 2, 1))
+barplot(rev(budget$size), horiz = TRUE, las = 1,
+        names.arg = rev(budget$source), col = "steelblue",
+        xlab = "error in certificate price units",
+        main = "Where the uncertainty actually comes from")
+par(op)
+```
+
+# Conclusion
+
+* The certificate price is linear in volatility with a slope of about
+  `r sprintf("%.1f", unname(stats::coef(lin)[2]))` per unit of $\sigma$, so
+  each volatility point is worth roughly
+  `r sprintf("%.3f", unname(stats::coef(lin)[2]) / 100)` in price.
+* Monte Carlo noise is the *smallest* of the three error sources by more than
+  an order of magnitude. Running more paths is the least useful thing that
+  could be done to this model.
+* The grid bias is larger, and cheap to fix: refine the grid or extrapolate.
+* Volatility misspecification dominates everything. Nothing inside the
+  simulation can address it.
+
+The ordering points outside the model. The next useful step is not a numerical
+improvement but an empirical one: estimate $\sigma$ from realised DAX returns
+and from option-implied volatility, and price the certificate on both, so the
+quoted number carries a market-based input rather than an assumed one.
