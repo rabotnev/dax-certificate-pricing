@@ -1,0 +1,231 @@
+---
+title: "Does Antithetic Sampling Actually Help?"
+author: "Daniil Rabotnev"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: paper
+    highlight: tango
+    df_print: paged
+subtitle: Measuring the variance reduction instead of assuming it
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5,
+                      cache = TRUE)
+devtools::load_all("..")
+```
+
+# The question
+
+Antithetic variates are the standard first move in Monte Carlo pricing: draw
+$Z$, also use $-Z$, get a lower variance for free. The pricing report applies
+them to both instruments and reports a confidence interval based on
+`sd(payoffs) / sqrt(n)`.
+
+Two things are worth checking rather than assuming.
+
+1. That standard error treats the $n$ payoffs as independent. They are not —
+   antithetic sampling produces $n/2$ *pairs*. Is the reported interval right?
+2. Variance reduction is not automatic. It relies on the payoff being monotone
+   in the underlying shock. Does that hold for both instruments here?
+
+This report answers both by measurement.
+
+```{r parameters}
+S0       <- 25250
+r        <- 0.02
+sigma    <- 0.18
+maturity <- 4
+M        <- 60
+K        <- 27000
+
+n_paths  <- 10000
+n_reps   <- 200      # replications for the ground-truth study
+```
+
+# A single run
+
+```{r single-run}
+set.seed(20260725)
+paths <- simulate_gbm(S0, r, sigma, maturity, M, n_paths, antithetic = TRUE)
+
+payoffs <- list(
+  call        = payoff_call(paths, K),
+  certificate = payoff_variance_certificate(paths)
+)
+
+diagnose <- function(p) {
+  half   <- length(p) / 2
+  pooled <- price_mc(p, r, maturity, antithetic = FALSE)
+  paired <- price_mc(p, r, maturity, antithetic = TRUE)
+  data.frame(
+    price       = paired$price,
+    pooled_se   = pooled$se,
+    paired_se   = paired$se,
+    correlation = stats::cor(p[seq_len(half)], p[half + seq_len(half)]),
+    ess         = paired$ess
+  )
+}
+
+single <- do.call(rbind, lapply(payoffs, diagnose))
+single
+```
+
+The two rows already disagree in sign. For the call the antithetic partners are
+negatively correlated, which is what the technique is supposed to deliver. For
+the certificate the correlation is close to $+1$ — the partner path carries
+almost the same information as the original.
+
+The effective sample size makes the consequence concrete: the call behaves as
+if it had far more than `r format(n_paths, big.mark = ",")` independent draws,
+the certificate as if it had roughly half.
+
+# Which standard error is right?
+
+A standard error is a claim about how much the price estimate would move if the
+simulation were rerun. That claim is directly testable: rerun it many times and
+look at the spread.
+
+```{r replication-study}
+one_replication <- function(seed) {
+  set.seed(seed)
+  P <- simulate_gbm(S0, r, sigma, maturity, M, n_paths, antithetic = TRUE)
+
+  rows <- lapply(
+    list(call        = payoff_call(P, K),
+         certificate = payoff_variance_certificate(P)),
+    function(p) {
+      data.frame(
+        price     = price_mc(p, r, maturity, antithetic = TRUE)$price,
+        pooled_se = price_mc(p, r, maturity, antithetic = FALSE)$se,
+        paired_se = price_mc(p, r, maturity, antithetic = TRUE)$se
+      )
+    }
+  )
+  cbind(instrument = names(rows), do.call(rbind, rows))
+}
+
+runs <- do.call(rbind, lapply(seq_len(n_reps), one_replication))
+
+comparison <- do.call(rbind, lapply(split(runs, runs$instrument), function(d) {
+  truth <- stats::sd(d$price)
+  data.frame(
+    empirical_sd  = truth,
+    pooled_se     = mean(d$pooled_se),
+    pooled_ratio  = mean(d$pooled_se) / truth,
+    paired_se     = mean(d$paired_se),
+    paired_ratio  = mean(d$paired_se) / truth
+  )
+}))
+comparison
+```
+
+`empirical_sd` is the ground truth: the actual spread of the price across
+`r n_reps` independent reruns. The two `*_ratio` columns say how badly each
+formula misstates it.
+
+The pooled standard error is wrong in both cases, and wrong in opposite
+directions — too wide for the call, too narrow for the certificate. The paired
+standard error tracks the truth for both.
+
+```{r se-plot, echo=FALSE, fig.height=4}
+op <- par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+for (nm in rownames(comparison)) {
+  d <- comparison[nm, ]
+  bp <- barplot(c(Truth = d$empirical_sd, Pooled = d$pooled_se,
+                  Paired = d$paired_se),
+                col = c("grey40", "indianred", "steelblue"),
+                ylab = "standard error", main = nm)
+  abline(h = d$empirical_sd, lty = 2)
+}
+par(op)
+```
+
+# Why the certificate breaks it
+
+Antithetic sampling reduces variance when the payoff is monotone in the shock,
+because then $f(Z)$ and $f(-Z)$ move in opposite directions. The certificate
+payoff is not monotone — it is a *range*.
+
+For a driftless Brownian path the range is exactly invariant under a sign flip:
+
+$$
+\max_t(-W_t) - \min_t(-W_t) = -\min_t W_t + \max_t W_t = \max_t W_t - \min_t W_t .
+$$
+
+That identity is exact in *log* space. The payoff, however, is measured in
+price space, and $\exp(\cdot)$ is monotone but not linear: it preserves where
+the maximum and minimum occur but not the distance between them. That is the
+only thing standing between the measured correlation and a perfect $+1$.
+
+The demonstration below separates the two. Choosing $r - \sigma^2/2 = 0$ kills
+the drift, so the log-range columns must agree to machine precision, while the
+price-space payoffs merely come close.
+
+```{r reflection-demo}
+set.seed(7)
+flat <- simulate_gbm(S0 = 100, r = 0.02, sigma = 0.2,   # r - sigma^2/2 == 0
+                     maturity = 1, M = 250, n_paths = 6, antithetic = TRUE)
+
+log_range <- function(P) apply(log(P), 1, function(x) max(x) - min(x))
+
+data.frame(
+  log_range_original   = log_range(flat)[1:3],
+  log_range_antithetic = log_range(flat)[4:6],
+  payoff_original      = payoff_variance_certificate(flat)[1:3],
+  payoff_antithetic    = payoff_variance_certificate(flat)[4:6]
+)
+```
+
+The first two columns are identical, the last two are not. The antithetic
+partner is close to a duplicate, so half the simulation budget buys almost
+nothing.
+
+# Crude versus antithetic at equal cost
+
+The fair comparison holds the number of simulated paths fixed and asks which
+scheme gives the smaller true error.
+
+```{r crude-vs-antithetic}
+scheme_sd <- function(antithetic, seed_offset) {
+  prices <- vapply(seq_len(n_reps), function(i) {
+    set.seed(seed_offset + i)
+    P <- simulate_gbm(S0, r, sigma, maturity, M, n_paths, antithetic = antithetic)
+    c(price_mc(payoff_call(P, K), r, maturity)$price,
+      price_mc(payoff_variance_certificate(P), r, maturity)$price)
+  }, numeric(2))
+  stats::setNames(apply(prices, 1, stats::sd), c("call", "certificate"))
+}
+
+head_to_head <- rbind(
+  crude      = scheme_sd(FALSE, 90000),
+  antithetic = scheme_sd(TRUE,  95000)
+)
+rbind(head_to_head, ratio = head_to_head["antithetic", ] / head_to_head["crude", ])
+```
+
+A ratio below one means antithetic sampling wins. Below the call column it does;
+below the certificate column it does not.
+
+# Conclusion
+
+* The standard error must be computed on the $n/2$ pair averages, not on the
+  pooled $n$ payoffs. Doing it the pooled way misstated the precision by roughly
+  a quarter in both instruments, in opposite directions.
+* Antithetic sampling is worth using for the European call and actively
+  counterproductive for the variance certificate, because the range of a path is
+  near-invariant under the sign flip the technique relies on.
+* Reporting the effective sample size alongside the standard error makes this
+  visible at a glance: values below $n$ are a signal that the variance-reduction
+  scheme is not paying for itself.
+
+The practical recommendation for this pricing problem is to keep antithetic
+sampling for the call and price the certificate with crude Monte Carlo at the
+same path count.

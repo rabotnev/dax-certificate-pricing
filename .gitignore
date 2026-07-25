@@ -9,3 +9,5 @@ data/raw/
 *_files/
 analysis/*.html
 analysis/*.pdf
+analysis/*_cache/
+analysis/*_files/
