@@ -4,14 +4,20 @@
 \alias{price_mc}
 \title{Monte Carlo price of a claim from its simulated payoffs}
 \usage{
-price_mc(payoffs, r, maturity, conf_level = 0.95)
+price_mc(payoffs, r, maturity, antithetic = FALSE, conf_level = 0.95)
 }
 \arguments{
-\item{payoffs}{numeric vector of terminal payoffs, one per simulated path}
+\item{payoffs}{numeric vector of terminal payoffs, one per simulated path.
+When \code{antithetic = TRUE} the first half must be the original draws and the
+second half their antithetic partners in matching order — the layout
+produced by \code{\link[=simulate_gbm]{simulate_gbm()}}.}
 
 \item{r}{numeric(1), continuously compounded riskless rate}
 
 \item{maturity}{numeric(1), horizon in years, > 0}
+
+\item{antithetic}{logical(1), were the payoffs generated with antithetic
+variates? See Details.}
 
 \item{conf_level}{numeric(1), confidence level of the interval, in (0, 1)}
 }
@@ -21,9 +27,29 @@ A list with elements
 \item{price}{the discounted mean payoff}
 \item{se}{standard error of \code{price}}
 \item{ci}{numeric(2), lower and upper confidence bounds}
-\item{n}{number of payoffs used}
+\item{n}{number of payoffs supplied}
+\item{ess}{effective sample size}
 }
 }
 \description{
 Monte Carlo price of a claim from its simulated payoffs
+}
+\details{
+Antithetic sampling produces \code{n/2} \emph{pairs}, not \code{n} independent draws, so the
+pooled standard deviation over all \code{n} payoffs is not a valid basis for the
+standard error. With \code{antithetic = TRUE} the estimator is treated as the mean
+of the \code{n/2} pair averages, which is what it actually is. The point estimate
+is identical either way; only its reported precision changes.
+
+Whether pairing helps or hurts depends on the payoff. For a payoff monotone
+in the underlying shock, such as a call, the two members of a pair are
+negatively correlated and the true standard error is \emph{below} the pooled one.
+For a payoff close to invariant under a sign flip of the shocks — the range
+\eqn{\max S_t - \min S_t} of a Brownian path is exactly invariant in the
+driftless case — the members are strongly \emph{positively} correlated, the true
+standard error is \emph{above} the pooled one, and antithetic sampling costs
+precision instead of adding it.
+
+\code{ess} is the number of independent draws that would give the same estimator
+variance. Values below \code{n} mean simulation effort is being wasted.
 }

@@ -37,3 +37,46 @@ test_that("pricing a call reproduces the Black-Scholes value", {
   res <- price_mc(payoff_call(S, K = 100), r = 0.05, maturity = 1)
   expect_equal(res$price, bs_call(100, 100, 0.05, 0.2, 1), tolerance = 0.01)
 })
+
+test_that("the point estimate does not depend on the antithetic flag", {
+  set.seed(3)
+  x <- stats::rexp(1000)
+  expect_equal(price_mc(x, 0.02, 1, antithetic = FALSE)$price,
+               price_mc(x, 0.02, 1, antithetic = TRUE)$price)
+})
+
+test_that("an odd number of payoffs is rejected when antithetic", {
+  expect_error(price_mc(stats::rexp(101), 0.02, 1, antithetic = TRUE),
+               "must be even")
+})
+
+test_that("pairing lowers the standard error for a monotone payoff", {
+  set.seed(4)
+  S <- simulate_gbm(S0 = 25250, r = 0.02, sigma = 0.18,
+                    maturity = 4, M = 60, n_paths = 1e4)
+  p      <- payoff_call(S, K = 27000)
+  pooled <- price_mc(p, 0.02, 4, antithetic = FALSE)
+  paired <- price_mc(p, 0.02, 4, antithetic = TRUE)
+  expect_lt(paired$se, pooled$se)
+  expect_gt(paired$ess, pooled$n)
+})
+
+test_that("pairing raises the standard error for the range payoff", {
+  # (max - min) of a Brownian path is invariant under Z -> -Z, so the pair
+  # members are strongly positively correlated. The pooled SE understates the
+  # true error and the effective sample size falls below n.
+  set.seed(4)
+  S <- simulate_gbm(S0 = 25250, r = 0.02, sigma = 0.18,
+                    maturity = 4, M = 60, n_paths = 1e4)
+  p      <- payoff_variance_certificate(S)
+  pooled <- price_mc(p, 0.02, 4, antithetic = FALSE)
+  paired <- price_mc(p, 0.02, 4, antithetic = TRUE)
+  expect_gt(paired$se, pooled$se)
+  expect_lt(paired$ess, pooled$n)
+})
+
+test_that("effective sample size equals n when the pairs are independent", {
+  set.seed(6)
+  res <- price_mc(stats::rexp(2e5), 0.02, 1, antithetic = TRUE)
+  expect_equal(res$ess, res$n, tolerance = 0.05)
+})
