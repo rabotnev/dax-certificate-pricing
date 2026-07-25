@@ -1,0 +1,325 @@
+---
+title: "Pricing Index Certificates on the DAX"
+author: "Daniil Rabotnev"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: paper
+    highlight: tango
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+subtitle: Monte Carlo Valuation of a European Call and a Variance Certificate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+```
+
+# Summary
+
+This report prices two DAX-linked instruments by Monte Carlo simulation under the
+risk-neutral measure. The underlying DAX index is modelled as a Geometric Brownian
+Motion and simulated on a grid of **M = 60** time steps over a **four-year** horizon,
+using **10,000 paths** generated with antithetic variates (5,000 original + 5,000
+antithetic draws) to reduce variance.
+
+At a volatility of 18% and a fixed annual coupon of 7.5, the two results are:
+
+* **European Call** (strike 27,000, maturity 4 years): the arbitrage-free value is
+  reported in Section 4.
+* **Variance Certificate**: the arbitrage-free price, combining the four fixed annual
+  coupons and the discounted terminal payoff $(\max - \min)/\text{avg}$ of the DAX
+  path, is reported in Section 5.
+
+All prices are discounted at the continuously compounded riskless rate of **2%**.
+Because the European Call is path-independent, the simulation matches the Black–Scholes
+closed-form solution closely, which we use as a validation benchmark.
+
+---
+
+# Background
+
+In the German market, index certificates are legally bonds that guarantee a stream
+of payments to their holders. For a *straight bond*, the full notional is repaid at
+maturity together with fixed annual coupons. For an **index certificate**, the
+terminal payment and/or the coupons depend on the development of the DAX.
+
+The goal of this project is to determine the **arbitrage-free price** of two such
+instruments. Under no-arbitrage, the fair value of any claim equals the expectation
+of its discounted payoff under the **risk-neutral (martingale) measure** $\mathbb{Q}$.
+We therefore simulate the DAX with the riskless rate as drift — *not* the physical
+drift of 8.7% — and discount all cashflows at the riskless rate.
+
+## Model Parameters and Contract Terms
+
+```{r parameters}
+# --- Market / model parameters ----------------------------------------------
+S0       <- 25250    # starting value of the DAX
+r        <- 0.02     # continuously compounded riskless rate (money market account)
+mu       <- 0.087    # physical drift (NOT used for pricing; risk-neutral uses r)
+maturity <- 4        # maturity in years
+M        <- 60       # number of time steps  ->  maturity/M = 4/60
+dt       <- maturity / M   # length of one time step
+
+sigma    <- 0.18     # volatility (18%)
+
+# --- Contract terms ---------------------------------------------------------
+K        <- 27000    # strike price of the European Call
+coupon   <- 7.5      # fixed annual coupon of the variance certificate
+
+# --- Monte Carlo settings ---------------------------------------------------
+n_half <- 5000               # original random draws
+n_sim  <- 2 * n_half         # total paths incl. antithetics = 10,000
+set.seed(20260725)           # reproducibility
+
+cat("Time step dt = maturity/M =", dt, "\n")
+cat("Total simulated paths =", n_sim, "\n")
+```
+
+---
+
+# Simulating the DAX
+
+## The Geometric Brownian Motion Model
+
+Under the risk-neutral measure $\mathbb{Q}$, the DAX follows
+$$
+dS_t = r\, S_t\, dt + \sigma\, S_t\, dW_t^{\mathbb{Q}},
+$$
+whose exact solution over one step of length $\Delta t$ is
+$$
+S_{t+\Delta t} = S_t \exp\!\left[\left(r - \tfrac{1}{2}\sigma^2\right)\Delta t
++ \sigma \sqrt{\Delta t}\, Z\right], \qquad Z \sim \mathcal{N}(0,1).
+$$
+We simulate the *full path* on the 60-step grid (required for the path-dependent
+variance certificate) and apply **antithetic variates**: for every standard-normal
+matrix $Z$ we also use $-Z$, which halves the number of independent draws while
+cutting Monte Carlo variance.
+
+```{r simulate-paths}
+# Draw 5,000 x 60 standard normals, then stack the antithetic counterpart -Z
+Z      <- matrix(rnorm(n_half * M), nrow = n_half, ncol = M)
+Z_full <- rbind(Z, -Z)                 # 10,000 x 60 matrix of shocks
+
+# Build log-paths column by column (vectorised over all paths)
+logS        <- matrix(0, nrow = n_sim, ncol = M + 1)
+logS[, 1]   <- log(S0)
+drift_step  <- (r - 0.5 * sigma^2) * dt
+diff_step   <- sigma * sqrt(dt)
+
+for (j in 1:M) {
+  logS[, j + 1] <- logS[, j] + drift_step + diff_step * Z_full[, j]
+}
+
+S  <- exp(logS)        # price paths: rows = scenarios, cols = time 0..M
+ST <- S[, M + 1]       # terminal DAX values
+
+dim(S)
+```
+
+## Sanity Check of the Simulated Terminal Distribution
+
+Under $\mathbb{Q}$ the expected terminal value should equal the forward price
+$S_0 e^{r\tau}$. The simulated mean lines up with this theoretical value, confirming
+the paths are correctly drifted.
+
+```{r path-check}
+theo_mean <- S0 * exp(r * maturity)
+sim_mean  <- mean(ST)
+
+data.frame(
+  Quantity = c("Theoretical E[S_T] = S0*exp(r*maturity)", "Simulated mean of S_T"),
+  Value    = c(theo_mean, sim_mean)
+)
+```
+
+```{r path-plot, echo=FALSE}
+# Plot a handful of sample paths for intuition
+matplot(t(S[1:50, ]), type = "l", lty = 1, col = adjustcolor("steelblue", 0.5),
+        xlab = "Time step (0 to 60)", ylab = "DAX level",
+        main = "50 Simulated DAX Paths under the Risk-Neutral Measure")
+abline(h = S0, col = "black", lwd = 2, lty = 2)
+```
+
+**Interpretation:** The simulated terminal mean matches $S_0 e^{r\tau}$ to within Monte
+Carlo error, so the discretisation and antithetic construction are working as
+intended. The fan of paths shows the typical lognormal spread of the DAX under 18%
+volatility over four years.
+
+---
+
+# European Call on the DAX
+
+The European Call pays $\max(S_T - K, 0)$ at maturity $\tau = 4$ and is
+**path-independent**, so only the terminal value $S_T$ matters. Its arbitrage-free
+price is
+$$
+C_0 = e^{-r\tau}\, \mathbb{E}^{\mathbb{Q}}\!\left[\max(S_T - K,\,0)\right].
+$$
+
+```{r call-price}
+payoff_call <- pmax(ST - K, 0)            # terminal payoffs
+disc        <- exp(-r * maturity)         # discount factor to today
+
+call_price  <- disc * mean(payoff_call)
+call_se     <- disc * sd(payoff_call) / sqrt(n_sim)   # standard error
+call_ci     <- call_price + c(-1, 1) * 1.96 * call_se # 95% CI
+
+cat("Monte Carlo European Call price :", round(call_price, 2), "\n")
+cat("Standard error                  :", round(call_se, 2), "\n")
+cat("95% confidence interval         : [",
+    round(call_ci[1], 2), ",", round(call_ci[2], 2), "]\n")
+```
+
+## Validation against Black–Scholes
+
+Because the payoff is path-independent we can benchmark the simulation against the
+exact Black–Scholes formula.
+
+```{r call-bs}
+bs_call <- function(S0, K, r, sigma, maturity) {
+  d1 <- (log(S0 / K) + (r + 0.5 * sigma^2) * maturity) / (sigma * sqrt(maturity))
+  d2 <- d1 - sigma * sqrt(maturity)
+  S0 * pnorm(d1) - K * exp(-r * maturity) * pnorm(d2)
+}
+
+bs_price <- bs_call(S0, K, r, sigma, maturity)
+
+data.frame(
+  Method = c("Monte Carlo (antithetic)", "Black-Scholes closed form"),
+  Price  = c(call_price, bs_price)
+)
+```
+
+**Interpretation:** The Monte Carlo estimate sits within a few index points of the
+closed-form Black–Scholes price and the analytic value lies inside the 95%
+confidence interval, validating the simulation engine. The option is
+out-of-the-money at inception (strike 27,000 vs. spot 25,250), so its value is driven
+mainly by the time value over the four-year horizon.
+
+---
+
+# Variance Certificate
+
+The variance certificate has two components:
+
+1. **Fixed annual coupons** of 7.5, paid at the end of years 1, 2, 3 and 4.
+2. A **terminal payoff** equal to the difference between the maximum and minimum
+   value of the DAX over the life of the certificate, divided by the average value
+   of the DAX:
+$$
+\text{Terminal payoff} = \frac{\max_{0\le t\le \tau} S_t - \min_{0\le t\le \tau} S_t}
+                              {\operatorname{avg}_{0\le t\le \tau} S_t}.
+$$
+
+The arbitrage-free price discounts every cashflow at the riskless rate:
+$$
+P_0 = \underbrace{\sum_{i=1}^{4} c\, e^{-r\,i}}_{\text{coupons}}
+    \;+\; \underbrace{e^{-r\tau}\,\mathbb{E}^{\mathbb{Q}}
+      \!\left[\frac{\max S_t - \min S_t}{\operatorname{avg} S_t}\right]}_{\text{terminal payoff}}.
+$$
+
+## Present Value of the Coupons
+
+The coupons are deterministic, so their value is a simple discounted sum.
+
+```{r certificate-coupons}
+coupon_times <- 1:4
+PV_coupons   <- sum(coupon * exp(-r * coupon_times))
+
+data.frame(
+  Year       = coupon_times,
+  Coupon     = coupon,
+  DiscFactor = exp(-r * coupon_times),
+  PV         = coupon * exp(-r * coupon_times)
+)
+cat("Present value of all coupons :", round(PV_coupons, 4), "\n")
+```
+
+## Terminal Payoff from the Simulated Paths
+
+The terminal payoff is path-dependent: it uses the running maximum, minimum and
+average of each simulated DAX path (including the starting value at $t=0$).
+
+```{r certificate-terminal}
+path_max <- apply(S, 1, max)     # maximum DAX over each path
+path_min <- apply(S, 1, min)     # minimum DAX over each path
+path_avg <- apply(S, 1, mean)    # average DAX over each path (incl. t=0)
+
+terminal_payoff <- (path_max - path_min) / path_avg
+
+PV_terminal <- exp(-r * maturity) * mean(terminal_payoff)
+term_se     <- exp(-r * maturity) * sd(terminal_payoff) / sqrt(n_sim)
+
+cat("Mean terminal payoff (undiscounted):", round(mean(terminal_payoff), 4), "\n")
+cat("PV of terminal payoff              :", round(PV_terminal, 4), "\n")
+cat("Standard error of PV terminal      :", round(term_se, 4), "\n")
+```
+
+```{r certificate-hist, echo=FALSE}
+hist(terminal_payoff, breaks = 40, col = "lightsteelblue", border = "white",
+     xlab = "(max - min) / average",
+     main = "Distribution of the Variance-Certificate Terminal Payoff")
+abline(v = mean(terminal_payoff), col = "red", lwd = 2)
+```
+
+## Arbitrage-Free Price of the Certificate
+
+```{r certificate-price}
+cert_price <- PV_coupons + PV_terminal
+cert_se    <- term_se     # only the terminal part carries MC uncertainty
+cert_ci    <- cert_price + c(-1, 1) * 1.96 * cert_se
+
+data.frame(
+  Component = c("PV of coupons", "PV of terminal payoff", "TOTAL certificate price"),
+  Value     = c(PV_coupons, PV_terminal, cert_price)
+)
+
+cat("\nArbitrage-free price of the certificate :", round(cert_price, 4), "\n")
+cat("95% confidence interval                 : [",
+    round(cert_ci[1], 4), ",", round(cert_ci[2], 4), "]\n")
+```
+
+**Interpretation:** The certificate price is dominated by the four fixed coupons,
+since the terminal payoff is a *ratio* (range divided by average) and therefore a
+small number — typically below one. The terminal payoff rises with volatility:
+a higher $\sigma$ widens the gap between the path maximum and minimum, increasing the
+$(\max-\min)$ range relative to the average level. At 18% volatility the expected
+ratio is moderate, contributing only a fraction of an index point to the total price
+once discounted.
+
+---
+
+# Conclusion
+
+Using a single set of 10,000 antithetic Monte Carlo paths on a 60-step grid, both
+instruments were priced under the risk-neutral measure:
+
+* The **European Call** was valued by discounting the terminal payoff
+  $\max(S_T-K,0)$, and the result was validated against the closed-form
+  Black–Scholes price, confirming the correctness of the simulation.
+* The **Variance Certificate** was valued as the sum of the discounted fixed coupons
+  and the discounted expected terminal ratio $(\max-\min)/\text{avg}$, exploiting the
+  full simulated paths for the path-dependent component.
+
+Key modelling choices — using the riskless rate (not the physical drift) for pricing,
+simulating the entire path for the path-dependent payoff, and applying antithetic
+variates for variance reduction — follow directly from no-arbitrage pricing theory.
+The reported confidence intervals indicate the Monte Carlo estimates are precise at
+the chosen sample size.
+
+```{r results-summary, echo=FALSE}
+data.frame(
+  Instrument = c("European Call (K = 27000)",
+                 "Variance Certificate (coupon = 7.5)"),
+  Price      = c(round(call_price, 2), round(cert_price, 4))
+)
+```

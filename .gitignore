@@ -7,3 +7,5 @@
 renv/library/
 data/raw/
 *_files/
+analysis/*.html
+analysis/*.pdf
