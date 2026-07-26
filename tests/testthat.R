@@ -7,6 +7,6 @@
 # * https://testthat.r-lib.org/articles/special-files.html
 
 library(testthat)
-library(dax-certificate-pricing)
+library(daxcerts)
 
-test_check("dax-certificate-pricing")
+test_check("daxcerts")
