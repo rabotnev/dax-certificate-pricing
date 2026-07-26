@@ -3,9 +3,13 @@ Title: Monte Carlo Pricing of DAX Index Certificates
 Version: 0.0.0.9000
 Authors@R: 
     person("Daniil", "Rabotnev", , "72888538+rabotnev@users.noreply.github.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
+Description: Monte Carlo valuation of DAX-linked index certificates under the
+    risk-neutral measure, with correct standard errors for antithetic sampling
+    and diagnostics for discretisation bias.
 License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
     license
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
+Imports: 
+    stats
